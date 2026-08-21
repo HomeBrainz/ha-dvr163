@@ -1,0 +1,26 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Add DVR163 camera",
+        "data": {
+          "host": "Host (IP address)",
+          "port": "Port",
+          "username": "Username",
+          "password": "Password",
+          "stream_path": "Stream path"
+        },
+        "data_description": {
+          "stream_path": "Usually /livestream/11 (main stream) or /livestream/12 (substream)."
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "Could not reach the camera at that address/path.",
+      "invalid_auth": "Username or password rejected."
+    },
+    "abort": {
+      "already_configured": "This camera is already configured."
+    }
+  }
+}
