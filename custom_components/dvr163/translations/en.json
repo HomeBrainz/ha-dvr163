@@ -7,11 +7,7 @@
           "host": "Host (IP address)",
           "port": "Port",
           "username": "Username",
-          "password": "Password",
-          "stream_path": "Stream path"
-        },
-        "data_description": {
-          "stream_path": "Usually /livestream/11 (main stream) or /livestream/12 (substream)."
+          "password": "Password"
         }
       }
     },

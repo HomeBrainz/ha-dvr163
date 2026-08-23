@@ -39,9 +39,14 @@ server, no cloud dependency — install via HACS, add the camera, done.
 
 ## What you get
 
-- **Camera** entity — live video **and audio**, via Home Assistant's normal
-  stream/HLS pipeline (H.265 video is copied through as-is; audio is
-  remuxed from AAC).
+- **Two camera entities per device — "Main" and "Sub"** — live video **and
+  audio** for both, via Home Assistant's normal stream/HLS pipeline (H.265
+  video is copied through as-is; audio is remuxed from AAC). This firmware
+  family always exposes both a full-resolution main stream and a lower-
+  resolution sub stream at fixed paths, so both are set up automatically —
+  no need to pick just one at setup time. Use "Sub" wherever a lighter feed
+  is enough (dashboard tiles, motion-triggered snapshots, constrained
+  bandwidth/CPU) and "Main" for actual viewing.
 - **Buttons** — PTZ (left/right/up/down/stop) and 4 presets.
 - **Number** entities — hue, brightness, saturation, contrast.
 - **Switch** entities — flip, mirror.
@@ -55,9 +60,8 @@ the live stream instead.
 1. HACS → Custom repositories → add this repo URL, category "Integration".
 2. Install "DVR163 IP Camera", restart Home Assistant.
 3. Settings → Devices & services → Add integration → "DVR163 IP Camera".
-4. Enter the camera's IP, port (default 80), username/password, and stream
-   path (default `/livestream/11`; use `/livestream/12` for the lighter
-   substream instead).
+4. Enter the camera's IP, port (default 80), and username/password. Both
+   stream entities are created automatically.
 
 ## Known firmware quirks this integration works around
 
@@ -66,18 +70,41 @@ the live stream instead.
   `127`. Every write from this integration always resends the full set
   (hue/brightness/saturation/contrast/scene/flip/mirror) rather than just
   the one value that changed.
-- **`ffmpeg`'s local http listener accepts exactly one client for its
-  process lifetime.** The stream pipeline is supervised and automatically
-  restarted whenever it drops — this is expected behavior on every
-  reconnect, not a bug, and Home Assistant's `stream` integration is the
-  only intended client of it.
+- **ffmpeg needs to be handed a real container format, and the camera's raw
+  feed carries no timing info at all** (RTP headers, including
+  timestamps, are stripped well before ffmpeg ever sees the data — see
+  `protocol.py`). MPEG-TS muxing fatally errors without timestamps
+  ("first pts and dts value must be set"); this integration tells ffmpeg
+  to stamp every packet by wall-clock arrival time instead
+  (`-use_wallclock_as_timestamps 1`), which is the standard fix for a raw
+  piped/live source like this one.
+- **ffmpeg's own `-listen 1` HTTP output is a dead end for this use case.**
+  It accepts exactly one client for the process's entire lifetime and
+  doesn't bind until ffmpeg has finished probing *both* inputs — for a
+  real live/piped camera source (as opposed to an instant synthetic test
+  source) that reliably took 30s+ and sometimes didn't happen at all
+  within any reasonable bound. Handing that URL straight to Home Assistant
+  produces an intermittent "Connection refused" (confirmed against a real
+  instance); even connecting to it internally first doesn't fix the
+  underlying slowness, just the race. Instead, ffmpeg writes MPEG-TS to
+  its own stdout pipe (available the instant the process starts, no
+  listen/accept handshake at all), and this integration re-serves those
+  bytes via its own persistent local server, which Home Assistant connects
+  to. That server starts immediately when the integration loads and
+  accepts any number of Home Assistant (re)connections independently of
+  camera/ffmpeg restarts underneath it.
+- **ffmpeg's own dual-input probing time is genuinely variable** for a
+  real camera feed — observed anywhere from ~4s to 45s+, occasionally
+  stalling indefinitely with no error raised. Every read from ffmpeg's
+  output is bounded by an internal stall timeout (45s), so a stuck attempt
+  always gets abandoned and retried by the supervisor loop rather than
+  potentially hanging forever.
 
 ## Compatibility
 
-Confirmed against an OOSSXX 5323-W6-L2. Likely to work unmodified, or with
-just a different `stream_path`, on any other camera from this same
-Tmezon/EseeCloud/IP Pro/VR Cam OEM family — try it and open an issue either
-way.
+Confirmed against an OOSSXX 5323-W6-L2. Likely to work unmodified on any
+other camera from this same Tmezon/EseeCloud/IP Pro/VR Cam OEM family — try
+it and open an issue either way.
 
 ## License
 

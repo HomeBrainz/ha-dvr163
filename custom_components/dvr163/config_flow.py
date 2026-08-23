@@ -11,13 +11,7 @@ from homeassistant.const import CONF_HOST, CONF_PASSWORD, CONF_PORT, CONF_USERNA
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
 from .api import Dvr163Api, Dvr163ApiError
-from .const import (
-    CONF_STREAM_PATH,
-    DEFAULT_PORT,
-    DEFAULT_STREAM_PATH,
-    DEFAULT_USERNAME,
-    DOMAIN,
-)
+from .const import DEFAULT_PORT, DEFAULT_USERNAME, DOMAIN, STREAM_PATH_MAIN
 from .protocol import Dvr163Client, Dvr163ProtocolError
 
 _LOGGER = logging.getLogger(__name__)
@@ -28,7 +22,6 @@ STEP_USER_SCHEMA = vol.Schema(
         vol.Optional(CONF_PORT, default=DEFAULT_PORT): int,
         vol.Optional(CONF_USERNAME, default=DEFAULT_USERNAME): str,
         vol.Optional(CONF_PASSWORD, default=""): str,
-        vol.Optional(CONF_STREAM_PATH, default=DEFAULT_STREAM_PATH): str,
     }
 )
 
@@ -77,10 +70,14 @@ class Dvr163ConfigFlow(ConfigFlow, domain=DOMAIN):
                 raise _InvalidAuth from err
             raise _CannotConnect from err
 
+        # Both streams live at fixed, well-known paths on this firmware
+        # family (see const.py) -- validating the main one is enough proof
+        # the camera and credentials are good; the sub stream is set up
+        # the same way at runtime and doesn't need a separate check here.
         client = Dvr163Client(
             data[CONF_HOST],
             data[CONF_PORT],
-            data[CONF_STREAM_PATH],
+            STREAM_PATH_MAIN,
             data[CONF_USERNAME],
             data[CONF_PASSWORD],
         )

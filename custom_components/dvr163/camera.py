@@ -8,17 +8,24 @@ from homeassistant.helpers.entity import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from . import Dvr163ConfigEntry
-from .const import DOMAIN
+from .const import DOMAIN, STREAMS
 
 
 async def async_setup_entry(
     hass: HomeAssistant, entry: Dvr163ConfigEntry, async_add_entities: AddEntitiesCallback
 ) -> None:
-    async_add_entities([Dvr163Camera(entry)])
+    async_add_entities(
+        Dvr163Camera(entry, stream_id, label) for stream_id, (_path, label) in STREAMS.items()
+    )
 
 
 class Dvr163Camera(Camera):
-    """Live view backed by the local remux pipeline in stream.py.
+    """Live view backed by one of the two remux pipelines in stream.py.
+
+    This firmware always exposes a main (full resolution) and sub (lower
+    resolution) stream at fixed paths -- see const.STREAMS -- so every
+    camera gets one entity per stream rather than forcing a choice of just
+    one at setup time.
 
     This firmware has no still-image/snapshot endpoint at all (confirmed
     absent, see README) -- there is no still_image_url to give this entity.
@@ -26,13 +33,14 @@ class Dvr163Camera(Camera):
     """
 
     _attr_has_entity_name = True
-    _attr_name = None
     _attr_supported_features = CameraEntityFeature.STREAM
 
-    def __init__(self, entry: Dvr163ConfigEntry) -> None:
+    def __init__(self, entry: Dvr163ConfigEntry, stream_id: str, label: str) -> None:
         super().__init__()
         self._entry = entry
-        self._attr_unique_id = f"{entry.entry_id}_camera"
+        self._stream_id = stream_id
+        self._attr_name = label
+        self._attr_unique_id = f"{entry.entry_id}_camera_{stream_id}"
         self._attr_device_info = DeviceInfo(
             identifiers={(DOMAIN, entry.entry_id)},
             name=entry.title,
@@ -42,4 +50,4 @@ class Dvr163Camera(Camera):
         )
 
     async def stream_source(self) -> str | None:
-        return self._entry.runtime_data.stream_manager.stream_url
+        return self._entry.runtime_data.stream_managers[self._stream_id].stream_url
