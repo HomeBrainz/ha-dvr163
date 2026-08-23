@@ -93,12 +93,29 @@ the live stream instead.
   to. That server starts immediately when the integration loads and
   accepts any number of Home Assistant (re)connections independently of
   camera/ffmpeg restarts underneath it.
-- **ffmpeg's own dual-input probing time is genuinely variable** for a
-  real camera feed — observed anywhere from ~4s to 45s+, occasionally
-  stalling indefinitely with no error raised. Every read from ffmpeg's
-  output is bounded by an internal stall timeout (45s), so a stuck attempt
-  always gets abandoned and retried by the supervisor loop rather than
-  potentially hanging forever.
+- **ffmpeg's default probing is needlessly slow for the video track, and
+  the fix has to be scoped carefully.** ffmpeg's default `-probesize`/
+  `-analyzeduration` are conservative (multiple MB / several seconds)
+  because normally it doesn't know the codec ahead of time — we already do
+  (`-f hevc`), so a much smaller probe size is set explicitly for the
+  video input, cutting typical startup from tens of seconds down to
+  ~0.3s. Applying the same reduction to the audio input made things
+  *worse*, not better — audio here is very low-bitrate (~16kbps), so a
+  "small" byte-based probe size takes far longer in wall-clock time to
+  satisfy than for video, even though the number looks identical. Audio
+  keeps ffmpeg's regular defaults; only video is tuned.
+- **Both streams hitting the camera in the same instant measurably
+  worsens startup contention** — confirmed by testing (a solo stream's
+  ~2-8s startup became 90s+ with both starting together). The two stream
+  pipelines are staggered a few seconds apart rather than started
+  simultaneously. Some run-to-run variability remains under concurrent
+  load even with staggering (roughly 2 of 3 attempts fast, 1 of 3 needing
+  a retry, in testing) — likely inherent to how this camera's firmware
+  handles concurrent connections rather than something fixable purely
+  client-side. Every read from ffmpeg's output is bounded by a generous
+  internal stall timeout (90s, sized for the dual-stream case), so a
+  stuck attempt always gets abandoned and retried by the supervisor loop
+  with exponential backoff rather than potentially hanging forever.
 
 ## Compatibility
 

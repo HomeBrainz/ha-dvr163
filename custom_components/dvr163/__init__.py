@@ -39,8 +39,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: Dvr163ConfigEntry) -> bo
         entry.data[CONF_PASSWORD],
     )
 
+    # Staggered, not simultaneous: two streams hitting the same camera at
+    # the exact same instant measurably worsened startup contention in
+    # testing (a solo stream's ~4-20s startup became ~50s with both
+    # starting together). Spreading the initial connection attempts out
+    # avoids concentrating that burst.
     stream_managers: dict[str, StreamManager] = {}
-    for stream_id, (stream_path, _label) in STREAMS.items():
+    for index, (stream_id, (stream_path, _label)) in enumerate(STREAMS.items()):
         manager = StreamManager(
             hass,
             entry.data[CONF_HOST],
@@ -48,6 +53,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: Dvr163ConfigEntry) -> bo
             stream_path,
             entry.data[CONF_USERNAME],
             entry.data[CONF_PASSWORD],
+            start_delay=index * 5,
         )
         manager.start()
         stream_managers[stream_id] = manager

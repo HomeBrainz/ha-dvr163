@@ -68,8 +68,14 @@ _MAX_BACKOFF = 30
 # has been observed taking anywhere from ~6s to 45s+. This bounds how long
 # a stalled attempt (no output at all, no error either) is tolerated
 # before the supervisor loop abandons it and retries -- see the long
-# comment at the read loop below.
-_STALL_TIMEOUT = 45
+# comment at the read loop below. Confirmed via testing that running two
+# streams (main + sub) against the same camera concurrently roughly
+# doubles this (a solo stream's ~4-20s startup became ~50s with both
+# running at once, presumably camera/host resource contention) -- 45s
+# wasn't generous enough for that and caused every single attempt to be
+# killed right before it would have succeeded. 90s comfortably covers the
+# worst case observed so far.
+_STALL_TIMEOUT = 90
 
 
 class StreamManager:
@@ -83,6 +89,7 @@ class StreamManager:
         path: str,
         username: str,
         password: str,
+        start_delay: float = 0,
     ) -> None:
         self._hass = hass
         self._host = host
@@ -90,6 +97,13 @@ class StreamManager:
         self._path = path
         self._username = username
         self._password = password
+        # Only delays the first camera/ffmpeg connection attempt, not the
+        # fan-out server below (stream_url is available immediately either
+        # way). Two streams against the same camera starting in the same
+        # instant measurably worsens the contention behind _STALL_TIMEOUT
+        # above -- staggering them spreads that initial connection burst
+        # out instead of concentrating it.
+        self._start_delay = start_delay
         self._task: asyncio.Task | None = None
         self._server: asyncio.base_events.Server | None = None
         self._clients: set[asyncio.StreamWriter] = set()
@@ -137,6 +151,8 @@ class StreamManager:
         )
         port = self._server.sockets[0].getsockname()[1]
         self._stream_url = f"http://127.0.0.1:{port}/stream.ts"
+        if self._start_delay:
+            await asyncio.sleep(self._start_delay)
         async with self._server:
             await self._supervisor_loop()
 
@@ -242,6 +258,22 @@ class StreamManager:
                 # output. Wall-clock timestamping (i.e. "stamp each packet
                 # with when ffmpeg actually received it") is the standard
                 # fix for exactly this class of input.
+                # -probesize/-analyzeduration on the VIDEO input only:
+                # ffmpeg's defaults are conservative (multiple MB / several
+                # seconds) because normally it doesn't know the codec ahead
+                # of time. We already tell it exactly what to expect
+                # (-f hevc), so it only needs enough data to confirm basic
+                # parameters (resolution) -- confirmed by testing this
+                # takes "Input #0 probed" from highly variable (sometimes
+                # 30s+) down to ~0.3s for the higher-resolution main
+                # stream. Deliberately NOT applied to the audio input below
+                # -- tried that first, and it made things *worse*: 64KB is
+                # tiny for high-bitrate video but huge for this low-bitrate
+                # (~16kbps) audio, where it takes ~16s of wall-clock time
+                # just to accumulate that many bytes regardless of the
+                # analyzeduration setting. Audio keeps ffmpeg's regular
+                # defaults, which were never the bottleneck.
+                "-probesize", "64k", "-analyzeduration", "500000",
                 "-thread_queue_size", "1024", "-use_wallclock_as_timestamps", "1",
                 "-f", "hevc", "-i", "pipe:0",
                 "-thread_queue_size", "1024", "-use_wallclock_as_timestamps", "1",
