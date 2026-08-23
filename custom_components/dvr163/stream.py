@@ -294,19 +294,39 @@ class StreamManager:
 
             async def feed_ffmpeg() -> None:
                 nonlocal audio_file
+                video_count = 0
+                audio_count = 0
+                audio_written = 0
                 async for pt, payload in client.stream():
                     if proc.returncode is not None:
                         raise Dvr163ProtocolError(
                             f"ffmpeg exited early (code {proc.returncode})"
                         )
                     if pt == PT_VIDEO_H265:
+                        video_count += 1
                         proc.stdin.write(payload)
                         await proc.stdin.drain()
+                        if video_count in (1, 5, 20) or video_count % 100 == 0:
+                            _LOGGER.debug(
+                                "%s: video_count=%d audio_count=%d audio_written=%d "
+                                "audio_file_ready=%s",
+                                self._path, video_count, audio_count, audio_written,
+                                audio_file is not None,
+                            )
                     elif pt == PT_AUDIO_AAC:
+                        audio_count += 1
+                        if audio_count in (1, 5, 20):
+                            _LOGGER.debug(
+                                "%s: audio frame #%d received from camera "
+                                "(audio_open_task done=%s)",
+                                self._path, audio_count, audio_open_task.done(),
+                            )
                         if audio_file is None and audio_open_task.done():
                             audio_file = audio_open_task.result()
+                            _LOGGER.debug("%s: audio FIFO writer became ready", self._path)
                         if audio_file is not None:
                             await loop.run_in_executor(None, audio_file.write, payload)
+                            audio_written += 1
 
             feed_task = asyncio.create_task(feed_ffmpeg())
 
@@ -363,13 +383,21 @@ class StreamManager:
         it leaks the thread forever if torn down before ffmpeg opens its
         end. Non-blocking open + retry is properly cancellable instead.
         """
+        attempts = 0
         while True:
+            attempts += 1
             try:
                 fd = os.open(path, os.O_WRONLY | os.O_NONBLOCK)
-            except OSError:
+            except OSError as err:
+                if attempts in (1, 5, 25) or attempts % 100 == 0:
+                    _LOGGER.debug(
+                        "%s: audio FIFO not ready yet (attempt %d, %s)",
+                        path, attempts, err,
+                    )
                 await asyncio.sleep(0.2)
                 continue
             os.set_blocking(fd, True)  # normal blocking writes from here on
+            _LOGGER.debug("%s: audio FIFO opened for writing after %d attempt(s)", path, attempts)
             return os.fdopen(fd, "wb")
 
     @staticmethod
