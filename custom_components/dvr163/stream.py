@@ -227,12 +227,19 @@ class StreamManager:
         tmp_dir = tempfile.mkdtemp(prefix="dvr163_")
         fifo_path = os.path.join(tmp_dir, "audio.fifo")
         os.mkfifo(fifo_path)
+        # Output also goes through a real named FIFO now, not ffmpeg's own
+        # stdout (pipe:1) -- see the long comment at the ffmpeg invocation
+        # below for why.
+        output_fifo_path = os.path.join(tmp_dir, "output.fifo")
+        os.mkfifo(output_fifo_path)
 
         proc: asyncio.subprocess.Process | None = None
         stderr_task: asyncio.Task | None = None
         audio_open_task: asyncio.Task | None = None
+        output_open_task: asyncio.Task | None = None
         feed_task: asyncio.Task | None = None
         audio_file = None
+        output_transport: asyncio.WriteTransport | None = None
         try:
             # ffmpeg writes MPEG-TS to its own stdout (pipe:1) rather than
             # an HTTP -listen socket. Tried the -listen approach first --
@@ -240,11 +247,21 @@ class StreamManager:
             # it could take 30s+ for ffmpeg to actually open that socket
             # for a real live/piped source (vs. an instant, non-realtime
             # synthetic test input), and sometimes didn't within any
-            # reasonable bound at all. A subprocess's stdout pipe has none
-            # of that: it's available the instant the process starts, no
-            # separate listen/accept handshake to wait on -- exactly the
-            # same piping pattern already used for feeding it video on
-            # stdin, just in the other direction.
+            # reasonable bound at all.
+            #
+            # Output goes to a real named FIFO, not ffmpeg's own stdout
+            # (pipe:1) -- also tried first, and worked reliably in every
+            # environment tested (Ubuntu ffmpeg 6.1.1/7.0.2, and even the
+            # exact matching Alpine-built 8.1.2 fetched and tested
+            # separately) except the actual affected system: there, real
+            # debug logs showed video+audio input consistently flowing
+            # into ffmpeg perfectly (hundreds of frames, every attempt),
+            # but ffmpeg's own "Output #0" line -- meaning it started
+            # actually muxing/writing -- never appeared a single time
+            # across many attempts and several minutes. Since named FIFOs
+            # (used for audio input) demonstrably DO work reliably on that
+            # same system, output goes through one too, sidestepping
+            # whatever's specific to that build's stdout-pipe handling.
             proc = await asyncio.create_subprocess_exec(
                 "ffmpeg",
                 "-y",
@@ -280,13 +297,14 @@ class StreamManager:
                 "-f", "aac", "-i", fifo_path,
                 "-c:v", "copy",
                 "-c:a", "aac", "-b:a", "32k", "-bsf:a", "aac_adtstoasc",
-                "-f", "mpegts", "pipe:1",
+                "-f", "mpegts", output_fifo_path,
                 stdin=asyncio.subprocess.PIPE,
-                stdout=asyncio.subprocess.PIPE,
+                stdout=asyncio.subprocess.DEVNULL,
                 stderr=asyncio.subprocess.PIPE,
             )
             stderr_task = asyncio.create_task(self._drain_stderr(proc))
             audio_open_task = asyncio.create_task(self._open_fifo_writer(fifo_path))
+            output_open_task = asyncio.create_task(self._open_fifo_reader(output_fifo_path))
 
             client = Dvr163Client(
                 self._host, self._port, self._path, self._username, self._password
@@ -335,16 +353,37 @@ class StreamManager:
             # hints) has turned out to be quite variable in testing --
             # anywhere from ~6s to indefinitely stalled waiting on the
             # audio side, with no error raised while stuck. Bounding every
-            # read with a stall timeout means a stuck attempt always gets
+            # wait with a stall timeout means a stuck attempt always gets
             # abandoned and retried by the supervisor loop instead of
             # potentially hanging forever.
+            try:
+                output_reader, output_transport = await asyncio.wait_for(
+                    asyncio.shield(output_open_task), timeout=_STALL_TIMEOUT
+                )
+            except asyncio.TimeoutError as err:
+                raise Dvr163ProtocolError(
+                    f"output FIFO never opened within {_STALL_TIMEOUT}s"
+                ) from err
+
             while True:
                 if feed_task.done():
                     feed_task.result()  # re-raise if it failed
                     raise Dvr163ProtocolError("camera feed ended")
                 try:
+                    # asyncio.StreamReader.read(), not a blocking read()
+                    # handed to a thread executor: the latter isn't
+                    # cleanly cancellable mid-call, and combined with
+                    # opening the FIFO O_RDWR (needed to avoid a premature
+                    # spurious EOF -- see _open_fifo_reader), killing
+                    # ffmpeg on timeout does NOT unblock it either, since
+                    # our own fd keeps the FIFO's writer count above zero
+                    # forever. Confirmed by testing: that combination
+                    # deadlocks on cleanup. A real StreamReader has none of
+                    # this -- it's driven by the event loop's own
+                    # non-blocking readiness notification, so cancellation
+                    # (via wait_for's timeout) actually works.
                     chunk = await asyncio.wait_for(
-                        proc.stdout.read(65536), timeout=_STALL_TIMEOUT
+                        output_reader.read(65536), timeout=_STALL_TIMEOUT
                     )
                 except asyncio.TimeoutError as err:
                     raise Dvr163ProtocolError(
@@ -371,6 +410,17 @@ class StreamManager:
             if proc is not None and proc.returncode is None:
                 proc.kill()
                 await proc.wait()
+            if output_transport is not None:
+                output_transport.close()
+            elif output_open_task is not None:
+                if output_open_task.done() and not output_open_task.cancelled():
+                    with contextlib.suppress(Exception):
+                        _, transport = output_open_task.result()
+                        transport.close()
+                else:
+                    output_open_task.cancel()
+                    with contextlib.suppress(asyncio.CancelledError):
+                        await output_open_task
             shutil.rmtree(tmp_dir, ignore_errors=True)
 
     @staticmethod
@@ -399,6 +449,43 @@ class StreamManager:
             os.set_blocking(fd, True)  # normal blocking writes from here on
             _LOGGER.debug("%s: audio FIFO opened for writing after %d attempt(s)", path, attempts)
             return os.fdopen(fd, "wb")
+
+    @staticmethod
+    async def _open_fifo_reader(path: str) -> tuple[asyncio.StreamReader, asyncio.BaseTransport]:
+        """Open a FIFO for reading (ffmpeg's mpegts output).
+
+        Two non-obvious things here, both confirmed by testing against a
+        real, slow, live source (not just a quick synthetic check):
+
+        1. Opened O_RDWR, not O_RDONLY. A FIFO read() returns EOF
+           immediately if *zero* writers are currently attached -- it does
+           NOT block waiting for one to show up. Since we open this before
+           ffmpeg does, an O_RDONLY reader would see zero writers at that
+           instant and every read() would spuriously EOF right away.
+           O_RDWR keeps a phantom write reference on our own fd (even
+           though we never write through it), keeping the writer count
+           above zero so reads correctly wait for ffmpeg's real data.
+
+        2. Returns a real asyncio.StreamReader (via connect_read_pipe),
+           not a plain file object read in a thread executor. A blocking
+           read() handed to run_in_executor isn't cleanly cancellable, and
+           combined with (1) above, killing ffmpeg on a timeout doesn't
+           unblock it either -- our own O_RDWR fd keeps the FIFO's writer
+           count above zero forever, so a stuck thread just stays stuck.
+           Confirmed by testing: that combination deadlocks on cleanup. A
+           real StreamReader is driven by the event loop's own
+           non-blocking readiness notification instead, so it's properly
+           cancellable and there's no separate thread to leak.
+        """
+        fd = os.open(path, os.O_RDWR)
+        _LOGGER.debug("%s: output FIFO opened for reading", path)
+        loop = asyncio.get_running_loop()
+        reader = asyncio.StreamReader()
+        protocol = asyncio.StreamReaderProtocol(reader)
+        transport, _ = await loop.connect_read_pipe(
+            lambda: protocol, os.fdopen(fd, "rb", buffering=0)
+        )
+        return reader, transport
 
     @staticmethod
     async def _drain_stderr(proc: asyncio.subprocess.Process) -> None:
