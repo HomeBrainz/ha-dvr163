@@ -1,5 +1,7 @@
 # DVR163 IP Camera — Home Assistant integration
 
+[![Add to HACS via My Home Assistant](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=HomeBrainz&repository=ha-dvr163&category=integration)
+
 A self-contained [HACS](https://hacs.xyz/) custom integration for the family of
 budget PTZ/IP cameras built on **HiSilicon Hi3510** silicon with a
 **Tmezon / EseeCloud** (also rebranded as **IP Pro** / **VR Cam**) cloud/P2P
