@@ -448,7 +448,7 @@ class StreamManager:
                 continue
             os.set_blocking(fd, True)  # normal blocking writes from here on
             _LOGGER.debug("%s: audio FIFO opened for writing after %d attempt(s)", path, attempts)
-            return os.fdopen(fd, "wb")
+            return os.fdopen(fd, "wb", buffering=0)
 
     @staticmethod
     async def _open_fifo_reader(path: str) -> tuple[asyncio.StreamReader, asyncio.BaseTransport]:

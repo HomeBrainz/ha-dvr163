@@ -116,6 +116,19 @@ the live stream instead.
   internal stall timeout (90s, sized for the dual-stream case), so a
   stuck attempt always gets abandoned and retried by the supervisor loop
   with exponential backoff rather than potentially hanging forever.
+- **The audio FIFO writer needs unbuffered I/O, or ffmpeg's audio probe can
+  starve indefinitely.** Python's `open()`/`os.fdopen()` default to
+  buffered I/O — each `write()` call fills an internal userspace buffer
+  (~a few KB) that is only flushed to the actual OS pipe once it's full.
+  Audio frames here are tiny (a few hundred bytes each), so dozens of
+  writes could accumulate in that buffer without a single byte physically
+  reaching ffmpeg's end of the FIFO, while ffmpeg sits waiting on `Input
+  #1` to probe. This reproduced reliably on Alpine/musl builds (e.g. HAOS)
+  even though video probed and streamed fine — confirmed via a local
+  Docker Alpine container replaying captured camera data through the exact
+  same pipeline, isolating the stall to this one missing `buffering=0`.
+  Fixed by opening the audio FIFO unbuffered, matching what the output
+  FIFO reader already did for the same reason.
 
 ## Compatibility
 
