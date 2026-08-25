@@ -136,6 +136,10 @@ Confirmed against an OOSSXX 5323-W6-L2. Likely to work unmodified on any
 other camera from this same Tmezon/EseeCloud/IP Pro/VR Cam OEM family — try
 it and open an issue either way.
 
+## Sponsors
+
+Sponsored by [HomeBrainz](https://homebrainz.eu) and [InkVision](https://inkvision.eu).
+
 ## License
 
 MIT — see [LICENSE](LICENSE).
